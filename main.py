@@ -1,374 +1,392 @@
-# ai-excited-01 — one image that makes the AI judge sit up.
-#
-# A humpback whale smashing diagonally out of a smartphone screen: the
-# ocean cannot fit in a phone, and here it refuses to. Water bursts toward
-# the viewer, a warm sun burns top-right, and the whale itself shouts
-# HI, JUDGE! straight at the camera.
-#
-# Pure Python 3 standard library (math, os, struct, zlib). No network, no
-# file reads, no randomness, no clock: the same scene is drawn every time
-# and the same bytes are written to $MAKEFUN_OUTPUT_DIR/entry.png
-# (default /output/entry.png). The renderer is a small scanline rasterizer
-# written for this picture: spans, polygon fills, discs, rotated boxes and
-# a 5x7 bitmap font, all flat-vector poster style.
+#!/usr/bin/env python3
+"""ai-excited-01 entry: a humpback whale breaching out of a smartphone.
 
+Pure standard library (zlib + struct write the PNG bytes by hand). Renders one
+1024x1024 image to $MAKEFUN_OUTPUT_DIR/entry.png (or /output/entry.png).
+Fully deterministic: fixed constants only, no randomness, no timestamps.
+"""
 import math
 import os
 import struct
 import zlib
 
-SIZE = 1024
+W = 1024
+H = 1024
+img = bytearray(W * H * 3)
+
+NAVY = (13, 42, 90)
+WHALE = (18, 58, 107)
+WHALE_DARK = (10, 40, 80)
+BELLY = (238, 246, 255)
+FOAM = (235, 245, 255)
+SPRAY = (210, 235, 255)
+SKY_TOP = (125, 205, 250)
+SKY_BOT = (28, 128, 220)
+SEA_TOP = (13, 71, 161)
+SEA_BOT = (4, 30, 70)
+SUN = (255, 213, 79)
+SUN_GLOW = (255, 235, 150)
+PHONE = (15, 23, 42)
+SCREEN = (178, 235, 255)
+HALO = (90, 190, 255)
+ORANGE = (255, 140, 60)
+YELLOW = (255, 205, 40)
+WHITE = (255, 255, 255)
+WAVE = (90, 165, 235)
+BUBBLE = (170, 215, 250)
 
 
-def mix(a, b, t):
-    """Linear blend of two numbers."""
-    return a + (b - a) * t
+def set_px(x, y, c):
+    if 0 <= x < W and 0 <= y < H:
+        i = (y * W + x) * 3
+        img[i] = c[0]
+        img[i + 1] = c[1]
+        img[i + 2] = c[2]
 
 
-def blend(c1, c2, t):
-    """Linear blend of two RGB triples, returning ints."""
-    return (int(mix(c1[0], c2[0], t)),
-            int(mix(c1[1], c2[1], t)),
-            int(mix(c1[2], c2[2], t)))
+def fill_rect(x0, y0, x1, y1, c):
+    x0 = max(0, int(x0))
+    y0 = max(0, int(y0))
+    x1 = min(W - 1, int(x1))
+    y1 = min(H - 1, int(y1))
+    if x1 < x0 or y1 < y0:
+        return
+    row = bytes(c) * (x1 - x0 + 1)
+    for y in range(y0, y1 + 1):
+        i = (y * W + x0) * 3
+        img[i:i + (x1 - x0 + 1) * 3] = row
 
 
-class Raster:
-    """A plain RGB framebuffer with a few flat-shape painters."""
-
-    def __init__(self, w, h):
-        self.w = w
-        self.h = h
-        self.px = bytearray(w * h * 3)
-
-    def hspan(self, y, x0, x1, rgb):
-        """Paint one horizontal run, clipped to the canvas."""
-        y = int(y)
-        if y < 0 or y >= self.h:
-            return
-        x0 = max(0, int(x0))
-        x1 = min(self.w - 1, int(x1))
-        if x1 < x0:
-            return
-        r, g, b = rgb
-        start = (y * self.w + x0) * 3
-        self.px[start:start + (x1 - x0 + 1) * 3] = bytes((r, g, b)) * (x1 - x0 + 1)
-
-    def sky(self, stops):
-        """Vertical gradient. stops: [(fraction, rgb), ...] top to bottom."""
-        for y in range(self.h):
-            t = y / (self.h - 1)
-            rgb = stops[-1][1]
-            for k in range(len(stops) - 1):
-                f0, c0 = stops[k]
-                f1, c1 = stops[k + 1]
-                if f0 <= t <= f1:
-                    rgb = blend(c0, c1, (t - f0) / (f1 - f0) if f1 > f0 else 0.0)
-                    break
-            self.hspan(y, 0, self.w - 1, rgb)
-
-    def poly(self, pts, rgb):
-        """Scanline polygon fill with the half-open edge rule."""
-        if len(pts) < 3:
-            return
-        ys = [p[1] for p in pts]
-        top = max(0, int(math.floor(min(ys))))
-        bot = min(self.h - 1, int(math.ceil(max(ys))))
-        n = len(pts)
-        for y in range(top, bot + 1):
-            cuts = []
-            for i in range(n):
-                ax, ay = pts[i]
-                bx, by = pts[(i + 1) % n]
-                if (ay <= y < by) or (by <= y < ay):
-                    cuts.append(ax + (y - ay) * (bx - ax) / (by - ay))
-            cuts.sort()
-            for k in range(0, len(cuts) - 1, 2):
-                self.hspan(y, cuts[k], cuts[k + 1], rgb)
-
-    def disc(self, cx, cy, r, rgb):
-        """Filled circle."""
-        r = int(r)
-        for dy in range(-r, r + 1):
-            dx = int(math.sqrt(max(0, r * r - dy * dy)))
-            self.hspan(cy + dy, cx - dx, cx + dx, rgb)
-
-    def ellipse(self, cx, cy, rx, ry, rgb):
-        """Axis-aligned filled ellipse."""
-        ry = int(ry)
-        for dy in range(-ry, ry + 1):
-            f = dy / ry if ry else 0.0
-            dx = int(rx * math.sqrt(max(0.0, 1.0 - f * f)))
-            self.hspan(cy + dy, cx - dx, cx + dx, rgb)
-
-    def turn_ellipse(self, cx, cy, rx, ry, deg, rgb):
-        """Filled ellipse rotated by deg degrees."""
-        a = math.radians(deg)
-        ca, sa = math.cos(a), math.sin(a)
-        outline = []
-        for i in range(40):
-            t = 2.0 * math.pi * i / 40
-            x = rx * math.cos(t)
-            y = ry * math.sin(t)
-            outline.append((cx + x * ca - y * sa, cy + x * sa + y * ca))
-        self.poly(outline, rgb)
-
-    def seg(self, x0, y0, x1, y1, width, rgb):
-        """Thick segment, stamped as a chain of discs."""
-        length = math.hypot(x1 - x0, y1 - y0)
-        steps = max(1, int(length))
-        r = width / 2.0
-        for i in range(steps + 1):
-            t = i / steps
-            self.disc(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, r, rgb)
-
-    def path(self, pts, width, rgb):
-        """Thick open polyline."""
-        for i in range(len(pts) - 1):
-            self.seg(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
-                     width, rgb)
-
-    def rrect(self, x, y, w, h, r, rgb):
-        """Axis-aligned rectangle with rounded corners."""
-        self.poly([(x + r, y), (x + w - r, y), (x + w, y + r),
-                   (x + w, y + h - r), (x + w - r, y + h),
-                   (x + r, y + h), (x, y + h - r), (x, y + r)], rgb)
-        for cx, cy in ((x + r, y + r), (x + w - r, y + r),
-                       (x + r, y + h - r), (x + w - r, y + h - r)):
-            self.disc(cx, cy, r, rgb)
-
-    def rbox(self, cx, cy, w, h, deg, rgb, corner=0):
-        """Filled rectangle rotated by deg degrees, optional corner discs."""
-        a = math.radians(deg)
-        ca, sa = math.cos(a), math.sin(a)
-        hw, hh = w / 2.0, h / 2.0
-
-        def turn(px, py):
-            return (cx + px * ca - py * sa, cy + px * sa + py * ca)
-
-        self.poly([turn(-hw, -hh), turn(hw, -hh),
-                   turn(hw, hh), turn(-hw, hh)], rgb)
-        if corner:
-            for px, py in ((-hw + corner, -hh + corner),
-                           (hw - corner, -hh + corner),
-                           (-hw + corner, hh - corner),
-                           (hw - corner, hh - corner)):
-                qx, qy = turn(px, py)
-                self.disc(qx, qy, corner, rgb)
+def lerp_color(c0, c1, t):
+    return tuple(int(c0[i] + (c1[i] - c0[i]) * t) for i in range(3))
 
 
-def bezier3(p0, p1, p2, p3, n=48):
-    """Sample a cubic Bezier with de Casteljau interpolation."""
-    pts = []
-    for i in range(n + 1):
-        t = i / n
-        ax, ay = mix(p0[0], p1[0], t), mix(p0[1], p1[1], t)
-        bx, by = mix(p1[0], p2[0], t), mix(p1[1], p2[1], t)
-        cx, cy = mix(p2[0], p3[0], t), mix(p2[1], p3[1], t)
-        dx, dy = mix(ax, bx, t), mix(ay, by, t)
-        ex, ey = mix(bx, cx, t), mix(by, cy, t)
-        pts.append((mix(dx, ex, t), mix(dy, ey, t)))
-    return pts
+def vgrad(y0, y1, c0, c1):
+    for y in range(max(0, y0), min(H - 1, y1) + 1):
+        t = (y - y0) / max(1, y1 - y0)
+        c = lerp_color(c0, c1, t)
+        img[y * W * 3:(y + 1) * W * 3] = bytes(c) * W
 
 
-def save_png(raster, path):
-    """Encode the framebuffer as a plain RGB PNG, return its byte size."""
-    raw = bytearray()
-    stride = raster.w * 3
-    for y in range(raster.h):
-        raw.append(0)
-        raw += raster.px[y * stride:(y + 1) * stride]
-    data = zlib.compress(bytes(raw), 9)
-
-    def chunk(kind, payload):
-        c = struct.pack(">I", len(payload)) + kind + payload
-        return c + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
-
-    header = struct.pack(">IIBBBBB", raster.w, raster.h, 8, 2, 0, 0, 0)
-    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) +
-           chunk(b"IDAT", data) + chunk(b"IEND", b""))
-    with open(path, "wb") as f:
-        f.write(png)
-    return len(png)
+def disc(cx, cy, r, c):
+    cx = int(cx)
+    cy = int(cy)
+    r = int(r)
+    if r <= 0:
+        return
+    for y in range(max(0, cy - r), min(H - 1, cy + r) + 1):
+        dy = y - cy
+        dx = int(math.sqrt(max(0, r * r - dy * dy)))
+        x0 = max(0, cx - dx)
+        x1 = min(W - 1, cx + dx)
+        i = (y * W + x0) * 3
+        img[i:i + (x1 - x0 + 1) * 3] = bytes(c) * (x1 - x0 + 1)
 
 
-# 5x7 bitmap font. Each glyph is 7 rows; each row is a 5-bit integer,
-# bit 4 = leftmost pixel. Only the glyphs this picture needs.
-GLYPHS = {
-    "H": (0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001),
-    "I": (0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110),
-    ",": (0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00100),
-    "J": (0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100),
-    "U": (0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110),
-    "D": (0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110),
-    "G": (0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110),
-    "E": (0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111),
-    "!": (0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100),
-    " ": (0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000),
+def ellipse(cx, cy, rx, ry, c):
+    rx = int(rx)
+    ry = int(ry)
+    if rx <= 0 or ry <= 0:
+        return
+    for y in range(max(0, cy - ry), min(H - 1, cy + ry) + 1):
+        dy = (y - cy) / ry
+        dx = int(rx * math.sqrt(max(0.0, 1.0 - dy * dy)))
+        x0 = max(0, cx - dx)
+        x1 = min(W - 1, cx + dx)
+        i = (y * W + x0) * 3
+        img[i:i + (x1 - x0 + 1) * 3] = bytes(c) * (x1 - x0 + 1)
+
+
+def polygon(pts, c):
+    ys = [p[1] for p in pts]
+    y0 = max(0, int(min(ys)))
+    y1 = min(H - 1, int(max(ys)))
+    n = len(pts)
+    for y in range(y0, y1 + 1):
+        xs = []
+        for i in range(n):
+            x0, ya = pts[i]
+            x1, yb = pts[(i + 1) % n]
+            if (ya <= y < yb) or (yb <= y < ya):
+                t = (y - ya) / (yb - ya)
+                xs.append(x0 + t * (x1 - x0))
+        xs.sort()
+        for i in range(0, len(xs) - 1, 2):
+            xa = max(0, int(xs[i]))
+            xb = min(W - 1, int(xs[i + 1]))
+            if xb >= xa:
+                ii = (y * W + xa) * 3
+                img[ii:ii + (xb - xa + 1) * 3] = bytes(c) * (xb - xa + 1)
+
+
+def line(x0, y0, x1, y1, c, w=1):
+    steps = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
+    r = max(1, w // 2)
+    for i in range(steps + 1):
+        t = i / max(1, steps)
+        disc(int(x0 + (x1 - x0) * t), int(y0 + (y1 - y0) * t), r, c)
+
+
+def rrect(x, y, w, h, r, c):
+    polygon([(x + r, y), (x + w - r, y), (x + w, y + r), (x + w, y + h - r),
+             (x + w - r, y + h), (x + r, y + h), (x, y + h - r), (x, y + r)], c)
+    for cx, cy in [(x + r, y + r), (x + w - r, y + r),
+                   (x + w - r, y + h - r), (x + r, y + h - r)]:
+        disc(cx, cy, r, c)
+
+
+def rot_pt(x, y, cx, cy, ang):
+    ca = math.cos(ang)
+    sa = math.sin(ang)
+    dx = x - cx
+    dy = y - cy
+    return (cx + dx * ca - dy * sa, cy + dx * sa + dy * ca)
+
+
+def rotated_rrect(cx, cy, w, h, ang, r, c):
+    outer = [rot_pt(cx - w / 2, cy - h / 2, cx, cy, ang),
+             rot_pt(cx + w / 2, cy - h / 2, cx, cy, ang),
+             rot_pt(cx + w / 2, cy + h / 2, cx, cy, ang),
+             rot_pt(cx - w / 2, cy + h / 2, cx, cy, ang)]
+    polygon(outer, c)
+    for dx, dy in [(-w / 2 + r, -h / 2 + r), (w / 2 - r, -h / 2 + r),
+                   (w / 2 - r, h / 2 - r), (-w / 2 + r, h / 2 - r)]:
+        px, py = rot_pt(cx + dx, cy + dy, cx, cy, ang)
+        disc(int(px), int(py), r, c)
+
+
+# 5x7 pixel font, only the glyphs "HI, JUDGE!" needs.
+FONT = {
+    'H': ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+    'I': ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
+    ',': [".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."],
+    'J': ["..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."],
+    'U': ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+    'D': ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
+    'G': [".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."],
+    'E': ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
+    '!': ["..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."],
+    ' ': [".....", ".....", ".....", ".....", ".....", ".....", "....."],
 }
 
 
-def blit_text(raster, text, x, y, scale, ink, hot=None):
-    """Draw text with the bitmap font. hot colors the '!' characters."""
+def draw_text(x, y, s, scale, c):
     cx = x
-    for ch in text:
-        rows = GLYPHS.get(ch, GLYPHS[" "])
-        color = hot if (hot is not None and ch == "!") else ink
-        for row in range(7):
-            bits = rows[row]
-            for col in range(5):
-                if bits >> (4 - col) & 1:
-                    raster.poly([
-                        (cx + col * scale, y + row * scale),
-                        (cx + (col + 1) * scale, y + row * scale),
-                        (cx + (col + 1) * scale, y + (row + 1) * scale),
-                        (cx + col * scale, y + (row + 1) * scale)], color)
+    for ch in s:
+        g = FONT.get(ch, FONT[' '])
+        for r, row in enumerate(g):
+            for col, bit in enumerate(row):
+                if bit == '#':
+                    fill_rect(cx + col * scale, y + r * scale,
+                              cx + col * scale + scale - 1,
+                              y + r * scale + scale - 1, c)
         cx += 6 * scale
-    return cx
 
 
-# --- palette: deep night sea at the top, glowing cyan where the whale lands.
-SKY_TOP = (10, 14, 46)
-SKY_MID = (18, 58, 122)
-SEA_TOP = (14, 127, 216)
-SEA_DEEP = (7, 91, 143)
-SEA_FLOOR = (5, 62, 110)
-SUN_HEART = (255, 201, 60)
-SUN_HALO = (255, 158, 44)
-SUN_SPARK = (255, 224, 130)
-BACK = (18, 50, 94)
-BACK_SHADE = (14, 42, 82)
-UNDER = (216, 238, 247)
-RIMLIGHT = (53, 208, 255)
-SHELL = (27, 34, 51)
-GLOW = (127, 227, 255)
-FOAM = (234, 246, 255)
-PAPER = (255, 255, 255)
-FAINT = (159, 216, 245)
-INK = (10, 20, 40)
-SHOUT = (255, 90, 31)
+def draw_sky_and_sea():
+    vgrad(0, 470, SKY_TOP, SKY_BOT)
+    vgrad(470, H - 1, SEA_TOP, SEA_BOT)
+    # sun with glow and rays, top-left
+    for x, y in [(150, 140)]:
+        disc(x, y, 130, (255, 244, 190))
+        disc(x, y, 95, SUN_GLOW)
+        for k in range(12):
+            a = k * math.pi / 6 + 0.26
+            line(x + int(105 * math.cos(a)), y + int(105 * math.sin(a)),
+                 x + int(165 * math.cos(a)), y + int(165 * math.sin(a)), SUN, 7)
+        disc(x, y, 58, SUN)
+        disc(x + 14, y - 14, 30, (255, 230, 130))
+    # sparkles in the sky
+    for sx, sy, sr in [(300, 90, 12), (470, 60, 9), (620, 130, 10), (880, 60, 11),
+                       (950, 210, 9), (90, 300, 10), (760, 240, 8)]:
+        line(sx - sr, sy, sx + sr, sy, WHITE, 3)
+        line(sx, sy - sr, sx, sy + sr, WHITE, 3)
+    # horizon shimmer
+    for x in range(0, W, 26):
+        disc(x, 470 + int(3 * math.sin(x / 60.0)), 5, (150, 205, 245))
+    # rolling waves in the sea
+    for base, phase in [(560, 0.0), (660, 1.3), (800, 2.6), (920, 0.9)]:
+        prev = None
+        for x in range(0, W + 1, 8):
+            y = base + int(7 * math.sin(x / 55.0 + phase))
+            if prev is not None:
+                line(prev[0], prev[1], x, y, WAVE, 4)
+            prev = (x, y)
 
 
-def paint(r):
-    # 1. Night sky melting into the sea.
-    r.sky([(0.00, SKY_TOP), (0.35, SKY_MID), (0.62, SEA_TOP),
-           (0.68, SEA_DEEP), (1.00, SEA_FLOOR)])
+def quad_bezier(p0, c, p2, t):
+    u = 1.0 - t
+    return (u * u * p0[0] + 2 * u * t * c[0] + t * t * p2[0],
+            u * u * p0[1] + 2 * u * t * c[1] + t * t * p2[1])
 
-    # 2. A warm sun, top right, with a halo and a hot spot.
-    r.disc(820, 150, 112, SUN_HALO)
-    r.disc(820, 150, 88, SUN_HEART)
-    r.disc(845, 128, 26, SUN_SPARK)
 
-    # 3. Flat soft clouds.
-    for cx, cy, rx, ry in ((180, 150, 110, 26), (250, 175, 90, 22),
-                           (880, 420, 120, 24), (120, 430, 90, 20),
-                           (700, 90, 80, 18)):
-        r.ellipse(cx, cy, rx, ry, FOAM)
+def quad_tangent(p0, c, p2, t):
+    return (2 * (1 - t) * (c[0] - p0[0]) + 2 * t * (p2[0] - c[0]),
+            2 * (1 - t) * (c[1] - p0[1]) + 2 * t * (p2[1] - c[1]))
 
-    # 4. Three birds, two strokes each, fleeing the splash.
-    for bx, by, s in ((210, 240, 16), (300, 190, 12), (150, 330, 11)):
-        r.path([(bx - s, by), (bx, by + s * 0.55), (bx + s, by)], 4, PAPER)
 
-    # 5. Speed lines fanning out behind the whale.
-    ox, oy = 560, 640
-    for ang, ln, wd in ((-70, 300, 7), (-58, 340, 6), (-45, 300, 8),
-                        (-32, 360, 6), (-20, 300, 7), (-8, 330, 6),
-                        (4, 280, 7), (-78, 220, 5), (-50, 240, 5),
-                        (-12, 250, 5), (14, 220, 5), (-64, 260, 5)):
-        a = math.radians(ang)
-        r.seg(ox + math.cos(a) * 130, oy + math.sin(a) * 130,
-              ox + math.cos(a) * ln, oy + math.sin(a) * ln, wd, FAINT)
+def draw_phone():
+    cx, cy = 512, 730
+    ang = -0.18
+    # glow halo behind the phone
+    rotated_rrect(cx, cy, 404, 624, ang, 46, HALO)
+    # phone body and screen
+    rotated_rrect(cx, cy, 360, 580, ang, 42, PHONE)
+    rotated_rrect(cx, cy, 318, 538, ang, 30, SCREEN)
+    # light streak across the screen
+    p1 = rot_pt(cx - 170, cy - 200, cx, cy, ang)
+    p2 = rot_pt(cx + 60, cy - 200, cx, cy, ang)
+    p3 = rot_pt(cx + 170, cy + 200, cx, cy, ang)
+    p4 = rot_pt(cx - 60, cy + 200, cx, cy, ang)
+    polygon([p1, p2, p3, p4], (220, 248, 255))
+    # notch at the top of the screen
+    nx, ny = rot_pt(cx, cy - 258, cx, cy, ang)
+    disc(int(nx), int(ny), 12, PHONE)
+    # app icons on the lower half of the screen
+    icons = [(255, 140, 60), (120, 200, 90), (255, 205, 40),
+             (150, 120, 230), (90, 165, 235), (255, 110, 130)]
+    k = 0
+    for row in range(2):
+        for col in range(3):
+            lx = -100 + col * 100
+            ly = 130 + row * 95
+            ix, iy = rot_pt(cx + lx, cy + ly, cx, cy, ang)
+            rrect(int(ix) - 22, int(iy) - 22, 44, 44, 10, icons[k])
+            k += 1
+    # home indicator bar
+    hx, hy = rot_pt(cx, cy + 255, cx, cy, ang)
+    rrect(int(hx) - 55, int(hy) - 5, 110, 10, 5, (60, 90, 130))
 
-    # 6. A glow behind the phone, then the phone itself, tilted and
-    # cut by the bottom edge of the frame.
-    r.rbox(512, 905, 370, 650, -10, (40, 140, 200), corner=55)
-    r.rbox(512, 905, 320, 600, -10, SHELL, corner=34)
-    r.rbox(512, 880, 282, 520, -10, GLOW, corner=24)
-    # A little wave lives inside the screen; cracks spread from the
-    # point where the whale tears out of it.
-    r.path([(400, 980), (460, 950), (520, 975), (580, 945), (630, 965)],
-           7, PAPER)
-    for x0, y0, x1, y1 in ((500, 660, 430, 600), (500, 660, 570, 590),
-                           (500, 660, 505, 570), (500, 660, 450, 720)):
-        r.seg(x0, y0, x1, y1, 4, PAPER)
 
-    # 7. The whale: a dorsal curve and a ventral curve joined by a broad
-    # rounded snout, arcing up and to the right.
-    spine = bezier3((470, 800), (490, 630), (600, 440), (740, 330))
-    belly_edge = bezier3((520, 860), (640, 720), (730, 560), (800, 400))
-    snout = []
-    for i in range(13):
-        t = i / 12
-        u = 1 - t
-        snout.append((u * u * 740 + 2 * u * t * 852 + t * t * 800,
-                      u * u * 330 + 2 * u * t * 360 + t * t * 400))
-    outline = spine + snout + list(reversed(belly_edge))
-    r.poly(outline, BACK)
+def draw_whale():
+    p0 = (640.0, 520.0)   # tail base, just out of the phone screen
+    pc = (700.0, 150.0)   # control point: the arch of the leap
+    p2 = (330.0, 290.0)   # head, upper left
+    # tail flukes first, so the body overlaps the joint
+    polygon([(640, 520), (745, 430), (760, 480), (665, 535)], WHALE)
+    polygon([(640, 520), (750, 580), (720, 615), (660, 540)], WHALE)
+    # body: discs along the curve, radius tapering at both ends
+    pts = []
+    for i in range(91):
+        t = i / 90.0
+        pt = quad_bezier(p0, pc, p2, t)
+        r = 55 + 45 * math.sin(math.pi * math.pow(t, 0.9))
+        pts.append((pt, r, t))
+        disc(int(pt[0]), int(pt[1]), int(r), WHALE)
+    # white belly: discs offset to the underside of the curve
+    for pt, r, t in pts:
+        if 0.08 <= t <= 0.92:
+            tx, ty = quad_tangent(p0, pc, p2, t)
+            n = math.hypot(tx, ty) or 1.0
+            nx, ny = ty / n, -tx / n
+            if ny < 0:  # belly must face down (positive y)
+                nx, ny = -nx, -ny
+            disc(int(pt[0] + nx * 0.45 * r), int(pt[1] + ny * 0.45 * r),
+                 int(0.45 * r), BELLY)
+    # dorsal fin on the back, near the tail
+    pt, r, t = pts[11]
+    tx, ty = quad_tangent(p0, pc, p2, t)
+    n = math.hypot(tx, ty) or 1.0
+    bx, by = -ty / n, tx / n
+    if by > 0:
+        bx, by = -bx, -by
+    base = (pt[0] + bx * 0.7 * r, pt[1] + by * 0.7 * r)
+    tip = (pt[0] + bx * 1.25 * r, pt[1] + by * 1.25 * r)
+    polygon([(base[0] - 14, base[1] + 10), (tip[0], tip[1]),
+             (base[0] + 16, base[1] - 4)], WHALE_DARK)
+    # (no pectoral fin: on this arc it reads as a dark arrow through the belly)
+    # eye and smile near the head
+    head = quad_bezier(p0, pc, p2, 0.92)
+    disc(int(head[0] + 12), int(head[1] - 16), 10, WHITE)
+    disc(int(head[0] + 12), int(head[1] - 16), 5, (10, 15, 30))
+    line(int(head[0] - 30), int(head[1] + 28), int(head[0] + 55),
+         int(head[1] + 12), WHALE_DARK, 4)
+    # blowhole spray above the head
+    for sx, sy, sr in [(385, 190, 8), (405, 168, 6), (360, 180, 6), (425, 195, 7),
+                       (340, 205, 5), (415, 145, 5), (375, 155, 4)]:
+        disc(sx, sy, sr, SPRAY)
+    line(390, 215, 380, 175, SPRAY, 3)
+    line(405, 210, 415, 170, SPRAY, 3)
 
-    # Pale belly: the lower band of the body, up to 35% toward the spine.
-    underside = list(belly_edge)
-    for d, v in zip(reversed(spine), reversed(belly_edge)):
-        underside.append((mix(v[0], d[0], 0.35), mix(v[1], d[1], 0.35)))
-    r.poly(underside, UNDER)
 
-    # A rim of light along the spine.
-    r.path(spine, 7, RIMLIGHT)
+def draw_splash():
+    # foam where the whale bursts out of the screen
+    for sx, sy, sr, c in [
+            (600, 470, 26, FOAM), (560, 480, 20, FOAM), (650, 480, 22, FOAM),
+            (520, 500, 16, FOAM), (690, 500, 15, SPRAY), (600, 440, 18, FOAM),
+            (575, 455, 12, SPRAY), (630, 450, 13, FOAM), (545, 460, 10, SPRAY),
+            (665, 460, 11, SPRAY), (600, 500, 24, (200, 230, 255))]:
+        disc(sx, sy, sr, c)
+    # droplets flying up around the breach
+    for sx, sy, sr in [(520, 420, 8), (680, 430, 9), (560, 390, 7), (700, 480, 6),
+                       (480, 470, 7), (720, 440, 5), (540, 360, 5), (640, 380, 6)]:
+        disc(sx, sy, sr, SPRAY)
 
-    # Tail flukes, still half inside the phone: two wide lobes, each
-    # with a darker inner lobe.
-    r.turn_ellipse(420, 800, 78, 30, -25, BACK)
-    r.turn_ellipse(530, 822, 78, 30, 20, BACK)
-    r.turn_ellipse(420, 800, 56, 19, -25, BACK_SHADE)
-    r.turn_ellipse(530, 822, 56, 19, 20, BACK_SHADE)
 
-    # One sleek pectoral fin, tapered, angled down along the body.
-    r.poly([(632, 592), (668, 642), (602, 724), (574, 646)], BACK_SHADE)
+def draw_bubble():
+    # tail first, then the bubble body, then the text
+    polygon([(700, 195), (640, 275), (770, 195)], NAVY)
+    rrect(588, 63, 379, 134, 26, NAVY)
+    polygon([(712, 193), (662, 262), (755, 193)], WHITE)
+    rrect(592, 67, 371, 126, 22, WHITE)
+    draw_text(625, 118, "HI, JUDGE!", 5, NAVY)
 
-    # Eye set back from the snout, a long mouth line, and the blowhole
-    # spray fanning up and left.
-    r.disc(745, 350, 12, PAPER)
-    r.disc(745, 350, 6, INK)
-    r.disc(747, 347, 2, PAPER)
-    r.path([(805, 392), (765, 425), (705, 452)], 6, INK)
-    for i in range(18):
-        t = i / 17
-        spread = (i % 3 - 1) * 26
-        r.disc(702 - t * 150 + spread * t, 318 - t * 110,
-               8 - t * 4, PAPER if i % 2 else FAINT)
 
-    # 8. The breach: a tight foam arc where the body leaves the phone,
-    # a burst of droplets, and short spray strokes.
-    arc = []
-    for i in range(13):
-        a = math.pi * (1.08 + 0.84 * i / 12)
-        arc.append((500 + 120 * math.cos(a), 660 + 120 * 0.55 * math.sin(a)))
-    r.path(arc, 12, FOAM)
-    for i in range(30):
-        a = math.pi * (1.0 + 1.0 * ((i * 37) % 100) / 100.0)
-        rad = 120 + ((i * 53) % 170)
-        r.disc(500 + rad * math.cos(a), 660 + rad * 0.62 * math.sin(a),
-               4 + (i % 5) * 2, FOAM if i % 3 else FAINT)
-    for x0, y0, x1, y1 in ((500, 650, 380, 560), (500, 650, 620, 545),
-                           (500, 650, 430, 520), (500, 650, 580, 500)):
-        r.seg(x0, y0, x1, y1, 6, FOAM)
+def draw_fish_and_bubbles():
+    def fish(cx, cy, s, flip, c):
+        ellipse(cx, cy, int(22 * s), int(9 * s), c)
+        d = -1 if flip else 1
+        polygon([(cx + d * 20 * s, cy), (cx + d * 34 * s, cy - 10 * s),
+                 (cx + d * 34 * s, cy + 10 * s)], c)
+        disc(int(cx - d * 10 * s), int(cy - 2 * s), max(2, int(2 * s)), WHITE)
+    fish(200, 830, 1.0, False, ORANGE)
+    fish(850, 880, 1.1, True, ORANGE)
+    fish(300, 960, 0.8, False, YELLOW)
+    fish(150, 700, 0.7, False, YELLOW)
+    # bubbles rising from the phone
+    for bx, by, br in [(300, 640, 12), (280, 590, 9), (260, 540, 7),
+                       (740, 660, 11), (770, 610, 8), (800, 565, 6)]:
+        disc(bx, by, br, BUBBLE)
+        sea = lerp_color(SEA_TOP, SEA_BOT, (by - 470) / 554.0)
+        disc(bx, by, max(2, br - 3), sea)
 
-    # 9. The speech bubble, top left, tail pointing at the whale.
-    r.poly([(400, 214), (470, 214), (660, 300)], PAPER)
-    r.rrect(58, 64, 470, 150, 30, PAPER)
-    blit_text(r, "HI, JUDGE!", 88, 100, 7, INK, hot=SHOUT)
 
-    # 10. Foreground foam along the bottom edge.
-    for cx, rx in ((180, 200), (520, 260), (860, 210)):
-        r.ellipse(cx, 1030, rx, 46, FOAM)
+def draw_scene():
+    draw_sky_and_sea()
+    draw_phone()
+    draw_whale()
+    draw_splash()
+    draw_bubble()
+    draw_fish_and_bubbles()
+
+
+def png_chunk(typ, data):
+    out = struct.pack(">I", len(data)) + typ + data
+    out += struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
+    return out
+
+
+def write_png(path):
+    raw = b"".join(b"\x00" + bytes(img[y * W * 3:(y + 1) * W * 3])
+                   for y in range(H))
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
+    data = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr)
+            + png_chunk(b"IDAT", zlib.compress(raw, 6))
+            + png_chunk(b"IEND", b""))
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+    return len(data)
 
 
 def main():
+    draw_scene()
     out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out_dir, exist_ok=True)
-    frame = Raster(SIZE, SIZE)
-    paint(frame)
     path = os.path.join(out_dir, "entry.png")
-    size = save_png(frame, path)
-    print(f"wrote {path} ({size} bytes)")
+    n = write_png(path)
+    print("wrote %s (%d bytes)" % (path, n))
 
 
 if __name__ == "__main__":
